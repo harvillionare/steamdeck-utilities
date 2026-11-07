@@ -253,14 +253,24 @@ build_root() { # dest_root -> downloads + extracts PLAN into dest_root
   rm -f "$dest"/.PKGINFO "$dest"/.MTREE "$dest"/.BUILDINFO "$dest"/.INSTALL
 }
 
-prepare_packages() { # dest_root
+prepare_packages() { # -> builds the package tree in $WORK/root
   WORK="$(mktemp -d /tmp/steamdeck-zerotier.XXXXXX)"
   load_repos
   log "Resolving $PKG_NAME from: ${REPO_ORDER[*]}"
   resolve "$PKG_NAME"
   local names=() e; for e in "${PLAN[@]}"; do names+=("$(basename "$(dirname "${e#*|}")")"); done
   log "Packages to install: ${names[*]}"
-  build_root "$1"
+  build_root "$WORK/root"
+}
+
+cleanup_stray_root() {
+  # v1 bug: packages were extracted into /root instead of a temp dir.
+  # /root/usr never exists on SteamOS otherwise, so remove what it left.
+  if [[ -x /root/usr/bin/zerotier-one ]]; then
+    log "Cleaning up files left in /root by an earlier failed run"
+    rm -rf /root/usr
+    rmdir /root/var/lib/zerotier-one /root/var/lib /root/var 2>/dev/null || true
+  fi
 }
 
 # ------------------------------------------------------------ system bits --
@@ -285,7 +295,7 @@ require_root() {
     local rc=0
     sudo bash "$SELF" "${ORIG_ARGS[@]}" || rc=$?
     if [[ $rc -ne 0 ]]; then
-      die "failed (exit $rc). If sudo rejected you and you never set a password, run 'passwd' first, then re-run."
+      die "install failed (exit $rc); see the error above."
     fi
     exit 0
   fi
@@ -347,7 +357,7 @@ write_keep_list() {
 install_extension() {
   local stage="${EXT_DIR}.new"
   rm -rf "$stage"; mkdir -p "$stage"
-  prepare_packages "$WORK/root"
+  prepare_packages
 
   [[ -x "$WORK/root/usr/bin/zerotier-one" ]] || die "package did not contain /usr/bin/zerotier-one"
   cp -a "$WORK/root/usr" "$stage/"
@@ -465,6 +475,7 @@ case "$MODE" in
     require_root
     [[ "$(os_field ID)" == "steamos" ]] || warn "this does not look like SteamOS (ID=$(os_field ID)); continuing anyway"
     command -v systemd-sysext >/dev/null || die "systemd-sysext not found"
+    cleanup_stray_root
     persist_self
     install_extension
     write_units
