@@ -16,6 +16,8 @@
 #   * Adds a boot-time "heal" service that rebuilds the extension from the
 #     new OS version's repos whenever SteamOS has been updated.
 #   * Optionally enables sshd and installs SSH public keys.
+#   * Enables passwordless sudo for the deck user (disable: --no-passwordless-sudo),
+#     so remote maintenance does not need the Deck password.
 #
 # Usage (run as the normal 'deck' user in Desktop Mode -> Konsole):
 #   curl -fsSL https://raw.githubusercontent.com/harvillionare/steamdeck-utilities/main/zerotier/install.sh \
@@ -47,12 +49,14 @@ UNIT_DIR="/etc/systemd/system"
 ZT_UNIT="zerotier-one.service"
 HEAL_UNIT="steamdeck-zerotier-heal.service"
 KEEP_CONF="/etc/atomic-update.conf.d/steamdeck-utilities.conf"
+SUDOERS_FILE="/etc/sudoers.d/zz-steamdeck-utilities"
 
 MODE="install"
 NETWORK_ID=""
 SSH_KEYS=()
 GITHUB_KEYS_USER=""
 ENABLE_SSH=1
+ENABLE_SUDO=1
 PURGE=0
 DOWNLOAD_DIR=""
 ORIG_ARGS=("$@")
@@ -93,6 +97,7 @@ while [[ $# -gt 0 ]]; do
     --ssh-key)        SSH_KEYS+=("${2:?}"); shift 2 ;;
     --github-keys)    GITHUB_KEYS_USER="${2:?}"; shift 2 ;;
     --no-ssh)         ENABLE_SSH=0; shift ;;
+    --no-passwordless-sudo) ENABLE_SUDO=0; shift ;;
     --status)         MODE="status"; shift ;;
     --heal)           MODE="heal"; shift ;;
     --refresh)        MODE="refresh"; shift ;;
@@ -351,6 +356,7 @@ write_keep_list() {
       \( -name "$ZT_UNIT" -o -name "$HEAL_UNIT" -o -name sshd.service -o -name systemd-sysext.service \) \
       2>/dev/null | sort
     echo "/etc/ssh/ssh_host_*"
+    if [[ -f "$SUDOERS_FILE" ]]; then echo "$SUDOERS_FILE"; fi
   } > "$KEEP_CONF"
 }
 
@@ -429,6 +435,20 @@ setup_ssh() {
   systemctl enable --now sshd.service >/dev/null
 }
 
+setup_sudo() {
+  local user tmp; user="$(target_user)"
+  if [[ ! -d /etc/sudoers.d ]] || ! grep -Eqs '^[@#]includedir[[:space:]]+/etc/sudoers.d' /etc/sudoers; then
+    warn "sudo is not configured to read /etc/sudoers.d; skipping passwordless sudo"; return 0
+  fi
+  tmp="$(mktemp)"
+  printf '# Managed by steamdeck-utilities (zerotier/install.sh)\n%s ALL=(ALL) NOPASSWD: ALL\n' "$user" > "$tmp"
+  if command -v visudo >/dev/null 2>&1 && ! visudo -cqf "$tmp"; then
+    rm -f "$tmp"; warn "sudoers rule failed validation; skipping passwordless sudo"; return
+  fi
+  install -m 0440 -o root -g root "$tmp" "$SUDOERS_FILE"; rm -f "$tmp"
+  log "Enabled passwordless sudo for '$user'"
+}
+
 join_network() {
   local i
   for i in $(seq 1 30); do
@@ -450,6 +470,7 @@ show_status() {
   echo "Service:            $(systemctl is-active "$ZT_UNIT" 2>/dev/null || true) / $(systemctl is-enabled "$ZT_UNIT" 2>/dev/null || true)"
   echo "Heal service:       $(systemctl is-enabled "$HEAL_UNIT" 2>/dev/null || true)"
   echo "sshd:               $(systemctl is-active sshd 2>/dev/null || true) / $(systemctl is-enabled sshd 2>/dev/null || true)"
+  echo "Passwordless sudo:  $([[ -f $SUDOERS_FILE ]] && echo enabled || echo disabled)"
   if [[ $EUID -eq 0 ]] && command -v zerotier-cli >/dev/null 2>&1; then
     zerotier-cli info 2>/dev/null || true
     zerotier-cli listnetworks 2>/dev/null || true
@@ -497,12 +518,13 @@ case "$MODE" in
     systemctl enable "$HEAL_UNIT" >/dev/null
     systemctl enable "$ZT_UNIT" >/dev/null
     systemctl restart "$ZT_UNIT"
-    [[ "$MODE" == "install" && $ENABLE_SSH -eq 1 ]] && setup_ssh
+    if [[ "$MODE" == "install" && $ENABLE_SSH -eq 1 ]]; then setup_ssh; fi
+    if [[ "$MODE" == "install" && $ENABLE_SUDO -eq 1 ]]; then setup_sudo; fi
     write_keep_list
     join_network
     echo
     log "Done. ZeroTier node id: $(zerotier-cli info | awk '{print $3}')"
-    [[ -n "$NETWORK_ID" ]] && log "Authorize this node at https://my.zerotier.com/ (network $NETWORK_ID)"
+    if [[ -n "$NETWORK_ID" ]]; then log "Authorize this node at https://my.zerotier.com/ (network $NETWORK_ID)"; fi
     ;;
 
   heal)
@@ -523,12 +545,12 @@ case "$MODE" in
   uninstall)
     require_root
     systemctl disable --now "$ZT_UNIT" "$HEAL_UNIT" >/dev/null 2>&1 || true
-    rm -f "$UNIT_DIR/$ZT_UNIT" "$UNIT_DIR/$HEAL_UNIT" "$KEEP_CONF"
+    rm -f "$UNIT_DIR/$ZT_UNIT" "$UNIT_DIR/$HEAL_UNIT" "$KEEP_CONF" "$SUDOERS_FILE"
     systemd-sysext unmerge >/dev/null 2>&1 || true
     rm -rf "$EXT_DIR" "$STATE_DIR"
     systemd-sysext merge >/dev/null 2>&1 || true
     systemctl daemon-reload
     if [[ $PURGE -eq 1 ]]; then rm -rf "$ZT_HOME"; log "Removed ZeroTier identity"; fi
-    log "Uninstalled. (sshd and authorized_keys were left as-is.)"
+    log "Uninstalled (passwordless sudo removed; sshd and authorized_keys left as-is)."
     ;;
 esac
