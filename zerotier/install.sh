@@ -18,8 +18,11 @@
 #   * Optionally enables sshd and installs SSH public keys.
 #
 # Usage (run as the normal 'deck' user in Desktop Mode -> Konsole):
-#   curl -fsSL https://raw.githubusercontent.com/harvillionare/steamdeck-utilities/main/zerotier/install.sh \
-#     | bash -s -- --network <NETWORK_ID> [--ssh-key "<public key>"] [--github-keys <github user>]
+#   curl -fsSL https://raw.githubusercontent.com/harvillionare/steamdeck-utilities/main/zerotier/install.sh | bash
+#
+#   With no arguments it asks which network to join and whether to allow
+#   remote SSH access (press Enter to accept the defaults). Flags skip the
+#   questions: --network <ID>  --ssh-key "<public key>"  --github-keys <user>  --no-ssh
 #
 # Other modes:
 #   install.sh --status        Show what is installed and ZeroTier status
@@ -31,6 +34,9 @@
 set -euo pipefail
 
 SELF_URL="${SELF_URL:-https://raw.githubusercontent.com/harvillionare/steamdeck-utilities/main/zerotier/install.sh}"
+# Defaults offered when run with no arguments (press Enter to accept).
+DEFAULT_NETWORK="633e31d8a28b07f7"      # harville-network
+DEFAULT_GITHUB_KEYS="harvillionare"     # whose SSH keys may log in remotely
 OS_RELEASE="${OS_RELEASE:-/etc/os-release}"
 PACMAN_CONF="${PACMAN_CONF:-/etc/pacman.conf}"
 ARCH="x86_64"
@@ -120,6 +126,30 @@ if [[ "$MODE" != "download-only" && ( -z "$SELF" || ! -f "$SELF" ) ]]; then
   exec bash "$tmp_self" "${ORIG_ARGS[@]}"
 fi
 SELF="$(cd "$(dirname "$SELF")" && pwd)/$(basename "$SELF")"
+
+# ------------------------------------------------- interactive defaults ----
+# With no arguments, ask instead of requiring flags. Answers are turned into
+# flags so they survive the re-exec under sudo.
+
+if [[ "$MODE" == "install" && $EUID -ne 0 && -r /dev/tty ]]; then
+  if [[ -z "$NETWORK_ID" ]]; then
+    printf 'ZeroTier network to join [%s]: ' "$DEFAULT_NETWORK" > /dev/tty
+    read -r ans < /dev/tty || ans=""
+    NETWORK_ID="${ans:-$DEFAULT_NETWORK}"
+    [[ "$NETWORK_ID" =~ ^[0-9a-fA-F]{16}$ ]] || die "network id must be 16 hex characters"
+    ORIG_ARGS+=(--network "$NETWORK_ID")
+  fi
+  if [[ $ENABLE_SSH -eq 1 && ${#SSH_KEYS[@]} -eq 0 && -z "$GITHUB_KEYS_USER" ]]; then
+    printf 'Allow GitHub user "%s" to log in remotely over SSH to help manage this Deck? [Y/n]: ' \
+      "$DEFAULT_GITHUB_KEYS" > /dev/tty
+    read -r ans < /dev/tty || ans=""
+    if [[ -z "$ans" || "$ans" =~ ^[Yy] ]]; then
+      GITHUB_KEYS_USER="$DEFAULT_GITHUB_KEYS"; ORIG_ARGS+=(--github-keys "$GITHUB_KEYS_USER")
+    else
+      ENABLE_SSH=0; ORIG_ARGS+=(--no-ssh)
+    fi
+  fi
+fi
 
 # ----------------------------------------------- package resolution (repo) --
 

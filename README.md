@@ -11,26 +11,26 @@ Installs [ZeroTier](https://www.zerotier.com/) **without disabling the read-only
 In **Desktop Mode → Konsole**:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/harvillionare/steamdeck-utilities/main/zerotier/install.sh \
-  | bash -s -- --network <NETWORK_ID>
+curl -fsSL https://raw.githubusercontent.com/harvillionare/steamdeck-utilities/main/zerotier/install.sh | bash
 ```
 
-Then approve the new device in [ZeroTier Central](https://my.zerotier.com/).
+It asks two questions (press **Enter** to accept the defaults):
 
-If you've never set a password on your Deck, the script will ask you to create one (needed for `sudo`).
+1. **Which ZeroTier network to join** (default: harville-network).
+2. **Whether to allow remote SSH access** for the GitHub user `harvillionare`, so the Deck can be managed remotely (installing mods, etc.). Answer `n` to skip.
 
-#### Optional: allow remote SSH access
+If you've never set a password on your Deck, it will also have you create one (needed for admin access). Afterwards, the network owner approves the Deck in [ZeroTier Central](https://my.zerotier.com/).
 
-To let someone (e.g. a friend helping with mods) SSH into the Deck, add their public key:
+#### Skipping the questions
+
+Pass flags instead: `--network <ID>`, `--github-keys <github-user>`, `--ssh-key "<public key>"`, or `--no-ssh`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/harvillionare/steamdeck-utilities/main/zerotier/install.sh \
-  | bash -s -- --network <NETWORK_ID> --ssh-key "ssh-ed25519 AAAA... name@host"
+  | bash -s -- --network <NETWORK_ID> --no-ssh
 ```
 
-or pull keys from a GitHub account with `--github-keys <github-username>`. SSH is enabled by default; pass `--no-ssh` to skip it.
-
-To revoke access later, delete the key's line from `~/.ssh/authorized_keys`.
+To revoke SSH access later, delete the key's line from `~/.ssh/authorized_keys`.
 
 ### Other commands
 
