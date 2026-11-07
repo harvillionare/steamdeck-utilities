@@ -354,6 +354,8 @@ write_keep_list() {
   } > "$KEEP_CONF"
 }
 
+ext_active() { systemd-sysext status 2>/dev/null | grep -qw "$EXT_NAME"; }
+
 install_extension() {
   local stage="${EXT_DIR}.new"
   rm -rf "$stage"; mkdir -p "$stage"
@@ -364,13 +366,24 @@ install_extension() {
   [[ -d "$WORK/root/opt" ]] && cp -a "$WORK/root/opt" "$stage/"
 
   mkdir -p "$stage/usr/lib/extension-release.d"
-  printf 'ID=%s\n' "$(os_field ID)" > "$stage/usr/lib/extension-release.d/extension-release.${EXT_NAME}"
+  # ID=_any: merge regardless of OS version, so an old build keeps working
+  # after a SteamOS update until the heal service rebuilds it.
+  printf 'ID=_any\n' > "$stage/usr/lib/extension-release.d/extension-release.${EXT_NAME}"
 
   mkdir -p "$EXT_ROOT"
   systemctl stop "$ZT_UNIT" >/dev/null 2>&1 || true
   systemd-sysext unmerge >/dev/null 2>&1 || true
   rm -rf "$EXT_DIR"; mv "$stage" "$EXT_DIR"
-  systemd-sysext merge
+  systemd-sysext merge || true
+  if ! ext_active; then
+    # Older systemd without ID=_any support: pin to the exact OS version.
+    warn "systemd-sysext rejected ID=_any; pinning extension to SteamOS $(os_field VERSION_ID)"
+    printf 'ID=%s\nVERSION_ID=%s\n' "$(os_field ID)" "$(os_field VERSION_ID)" \
+      > "$EXT_DIR/usr/lib/extension-release.d/extension-release.${EXT_NAME}"
+    systemd-sysext unmerge >/dev/null 2>&1 || true
+    systemd-sysext merge || true
+  fi
+  ext_active || die "systemd-sysext did not activate the extension (see: systemd-sysext status)"
   systemctl daemon-reload
   # The package ships a sysusers.d entry for a 'zerotier-one' user; create it.
   systemd-sysusers >/dev/null 2>&1 || true
