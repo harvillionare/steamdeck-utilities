@@ -18,6 +18,9 @@
 #   * Optionally enables sshd and installs SSH public keys.
 #   * Enables passwordless sudo for the deck user (disable: --no-passwordless-sudo),
 #     so remote maintenance does not need the Deck password.
+#   * Sets Game Mode to never sleep while plugged in, so the Deck stays reachable
+#     (disable: --no-keep-awake). Battery sleep is unchanged. Desktop Mode already
+#     never sleeps on AC by default on SteamOS.
 #
 # Usage (run as the normal 'deck' user in Desktop Mode -> Konsole):
 #   curl -fsSL https://raw.githubusercontent.com/harvillionare/steamdeck-utilities/main/zerotier/install.sh \
@@ -57,6 +60,7 @@ SSH_KEYS=()
 GITHUB_KEYS_USER=""
 ENABLE_SSH=1
 ENABLE_SUDO=1
+ENABLE_AWAKE=1
 PURGE=0
 DOWNLOAD_DIR=""
 ORIG_ARGS=("$@")
@@ -98,6 +102,7 @@ while [[ $# -gt 0 ]]; do
     --github-keys)    GITHUB_KEYS_USER="${2:?}"; shift 2 ;;
     --no-ssh)         ENABLE_SSH=0; shift ;;
     --no-passwordless-sudo) ENABLE_SUDO=0; shift ;;
+    --no-keep-awake)  ENABLE_AWAKE=0; shift ;;
     --status)         MODE="status"; shift ;;
     --heal)           MODE="heal"; shift ;;
     --refresh)        MODE="refresh"; shift ;;
@@ -449,6 +454,105 @@ setup_sudo() {
   log "Enabled passwordless sudo for '$user'"
 }
 
+as_user() { # run a command as the target user with their session environment
+  local user uid; user="$(target_user)"; uid="$(id -u "$user")"
+  runuser -u "$user" -- env HOME="$(getent passwd "$user" | cut -d: -f6)" \
+    XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$@"
+}
+
+steam_vdf_set_ac_never() { # file -> prints: unchanged | changed | nosystem
+  python3 - "$1" <<'PYEOF'
+import os, re, sys
+path = sys.argv[1]
+lines = open(path, encoding="utf-8", errors="surrogateescape").read().split("\n")
+target = ["InstallConfigStore", "Software", "Valve", "Steam", "System"]
+key = "IdleSuspendACSeconds"
+stack, pending, out, state = [], None, [], "nosystem"
+for line in lines:
+    st = line.strip()
+    m = re.fullmatch(r'"([^"]*)"', st)
+    if st == "{":
+        stack.append(pending); pending = None; out.append(line); continue
+    if st == "}":
+        if stack == target and state == "nosystem":      # key missing: add it
+            out.append("\t" * len(stack) + '"%s"\t\t"0"' % key); state = "changed"
+        elif stack == target[:4] and state == "nosystem": # System block missing
+            ind = "\t" * len(stack)
+            out += [ind + '"System"', ind + "{", ind + '\t"%s"\t\t"0"' % key, ind + "}"]
+            state = "changed"
+        stack.pop() if stack else None; out.append(line); continue
+    if m:
+        pending = m.group(1)
+    kv = re.fullmatch(r'"%s"\s+"([^"]*)"' % key, st)
+    if kv and stack == target:
+        if kv.group(1) == "0":
+            state = "unchanged"
+        else:
+            line = line[: line.index('"')] + '"%s"\t\t"0"' % key; state = "changed"
+    out.append(line)
+if state == "changed":
+    st0 = os.stat(path)
+    tmp = path + ".steamdeck-utilities.tmp"
+    open(tmp, "w", encoding="utf-8", errors="surrogateescape").write("\n".join(out))
+    os.chown(tmp, st0.st_uid, st0.st_gid); os.chmod(tmp, st0.st_mode & 0o7777)
+    os.replace(tmp, path)
+print(state)
+PYEOF
+}
+
+setup_keep_awake() {
+  local user home vdf how="" i state
+  user="$(target_user)"; home="$(getent passwd "$user" | cut -d: -f6)"
+
+  # Game Mode (Steam): "Sleep after (plugged in)" = Never. Desktop Mode already
+  # never sleeps on AC by default on SteamOS, so it is left alone.
+  vdf="$home/.local/share/Steam/config/config.vdf"
+  if [[ ! -f "$vdf" ]] || ! command -v python3 >/dev/null 2>&1; then
+    warn "Steam config or python3 not found; skipping Game Mode keep-awake"; return 0
+  fi
+  if grep -Eq '^[[:space:]]*"IdleSuspendACSeconds"[[:space:]]+"0"' "$vdf"; then
+    log "Game Mode: never sleep while plugged in (already set)"; return 0
+  fi
+
+  # Steam rewrites config.vdf on exit, so it must be closed while we edit.
+  if as_user systemctl --user is-active --quiet steam-launcher.service 2>/dev/null; then
+    # Game Mode: SteamOS restarts Steam immediately (Upholds=), so mask the
+    # launcher until we are done (runtime-only: a reboot also clears it).
+    how=game
+    log "Restarting Steam briefly to change its sleep setting"
+    as_user systemctl --user mask --runtime --quiet steam-launcher.service || true
+    trap 'as_user systemctl --user unmask --runtime --quiet steam-launcher.service; as_user systemctl --user start steam-launcher.service; cleanup' EXIT
+    as_user systemctl --user stop steam-launcher.service >/dev/null 2>&1 || true
+  elif pgrep -x steam >/dev/null 2>&1; then
+    how=desktop
+    log "Closing Steam briefly to change its sleep setting"
+    as_user steam -shutdown >/dev/null 2>&1 &
+  fi
+  for i in $(seq 1 60); do pgrep -x steam >/dev/null 2>&1 || break; sleep 1; done
+
+  if pgrep -x steam >/dev/null 2>&1; then
+    warn "Steam did not close; skipping Game Mode keep-awake (re-run later)"
+  else
+    cp -p "$vdf" "$vdf.bak-steamdeck-utilities"
+    state="$(steam_vdf_set_ac_never "$vdf" 2>/dev/null || echo error)"
+    case "$state" in
+      changed|unchanged) log "Game Mode: never sleep while plugged in" ;;
+      *) warn "could not update Steam config ($state); restoring backup"
+         cp -p "$vdf.bak-steamdeck-utilities" "$vdf" ;;
+    esac
+  fi
+
+  case "$how" in
+    game)
+      as_user systemctl --user unmask --runtime --quiet steam-launcher.service || true
+      as_user systemctl --user start steam-launcher.service >/dev/null 2>&1 || true
+      trap cleanup EXIT ;;
+    desktop)
+      as_user systemd-run --user --collect --quiet steam -silent >/dev/null 2>&1 || true ;;
+  esac
+  return 0
+}
+
 join_network() {
   local i
   for i in $(seq 1 30); do
@@ -471,6 +575,8 @@ show_status() {
   echo "Heal service:       $(systemctl is-enabled "$HEAL_UNIT" 2>/dev/null || true)"
   echo "sshd:               $(systemctl is-active sshd 2>/dev/null || true) / $(systemctl is-enabled sshd 2>/dev/null || true)"
   echo "Passwordless sudo:  $([[ -f $SUDOERS_FILE ]] && echo enabled || echo disabled)"
+  local h; h="$(getent passwd "$(target_user)" | cut -d: -f6)"
+  echo "Awake on AC (Game): $(grep -Eq '"IdleSuspendACSeconds"[[:space:]]+"0"' "$h/.local/share/Steam/config/config.vdf" 2>/dev/null && echo yes || echo no)"
   if [[ $EUID -eq 0 ]] && command -v zerotier-cli >/dev/null 2>&1; then
     zerotier-cli info 2>/dev/null || true
     zerotier-cli listnetworks 2>/dev/null || true
@@ -520,6 +626,7 @@ case "$MODE" in
     systemctl restart "$ZT_UNIT"
     if [[ "$MODE" == "install" && $ENABLE_SSH -eq 1 ]]; then setup_ssh; fi
     if [[ "$MODE" == "install" && $ENABLE_SUDO -eq 1 ]]; then setup_sudo; fi
+    if [[ "$MODE" == "install" && $ENABLE_AWAKE -eq 1 ]]; then setup_keep_awake; fi
     write_keep_list
     join_network
     echo

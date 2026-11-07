@@ -32,6 +32,10 @@ or pull keys from a GitHub account with `--github-keys <github-username>`. SSH i
 
 To revoke access later, delete the key's line from `~/.ssh/authorized_keys`.
 
+#### Stays awake while plugged in
+
+The script sets Game Mode's **Sleep after (plugged in)** to **Never**, so a charging/docked Deck stays reachable (the screen still dims and turns off). Battery sleep is unchanged, and Desktop Mode already never sleeps on AC by default. Steam restarts once for a few seconds while this is applied. Skip it with `--no-keep-awake`.
+
 #### Passwordless sudo
 
 By default the script also lets the `deck` user run admin (`sudo`) commands **without a password**, so remote maintenance (installing mods/tools, restarting, updates) doesn't need someone to type the Deck password. Combined with SSH access, **this gives whoever holds the SSH key full control of the Deck.** Only run it with keys you trust.
