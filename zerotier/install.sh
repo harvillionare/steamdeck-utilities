@@ -268,10 +268,17 @@ prepare_packages() { # dest_root
 require_root() {
   if [[ $EUID -ne 0 ]]; then
     if ! sudo -n true 2>/dev/null; then
-      local st; st="$(passwd -S "$USER" 2>/dev/null | awk '{print $2}' || true)"
+      # Fresh Steam Decks have no password, so sudo cannot work yet.
+      local st ans; st="$(passwd -S "$USER" 2>/dev/null | awk '{print $2}' || true)"
+      if [[ -z "$st" ]]; then
+        printf 'Have you already set a password for "%s" on this Deck? [y/N] ' "$USER" > /dev/tty
+        read -r ans < /dev/tty || ans=""
+        [[ "$ans" =~ ^[Yy] ]] && st="P" || st="NP"
+      fi
       if [[ "$st" == "NP" || "$st" == "L" ]]; then
-        warn "user '$USER' has no password yet; sudo needs one. Set it now:"
-        passwd < /dev/tty
+        log "Your Deck needs a password for admin (sudo) access. Choose one now."
+        log "(You will type it twice, then once more for sudo. Nothing shows while typing.)"
+        passwd < /dev/tty > /dev/tty 2>&1 || die "setting the password failed; run 'passwd' manually and re-run"
       fi
     fi
     log "Re-running with sudo (enter the password for '$USER' if asked)"
